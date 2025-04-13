@@ -95,7 +95,7 @@ class TakePictureScreenState extends State<TakePictureScreen> {
       Uint8List imageBytes = await imageFile.readAsBytes();
       String base64Image = base64Encode(imageBytes);
 
-      var url = Uri.parse('http://192.168.1.125:1234/v1/chat/completions');
+      var url = Uri.parse('http://192.168.1.156:1234/v1/chat/completions');
       var headers = {'Content-Type': 'application/json'};
 
       var messages = [

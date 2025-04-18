@@ -1,300 +1,288 @@
 // lib/screens/take_picture_screen.dart
-import 'dart:async';
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
-import 'package:flutter_tts/flutter_tts.dart';
+import 'package:camera/camera.dart';
+import '../services/voice_service.dart';
+import '../services/camera_service.dart';
+import '../services/scene_description_service.dart';
 import '../services/api_service.dart';
-import 'display_picture_screen.dart';
+import '../services/speech_service.dart';
+import 'dart:async';
 
 class TakePictureScreen extends StatefulWidget {
-  const TakePictureScreen({Key? key, required this.camera}) : super(key: key);
   final CameraDescription camera;
+  const TakePictureScreen({super.key, required this.camera});
 
   @override
   TakePictureScreenState createState() => TakePictureScreenState();
 }
 
 class TakePictureScreenState extends State<TakePictureScreen> {
-  late CameraController _controller;
-  late Future<void> _initializeControllerFuture;
-  final TextEditingController _questionController = TextEditingController();
-  bool _isQuestionEmpty = true;
-  bool _isTakingPicture = false;
+  // Services
+  late CameraService _cameraService;
+  late VoiceService _voiceService;
+  late SceneDescriptionService _sceneDescriptionService;
+  late SpeechService _speechService;
 
-  // Speech-to-text instance and state.
-  stt.SpeechToText _speech = stt.SpeechToText();
-  bool _isListening = false;
-  String _currentQuestion = "";
-
-  // Flags to prevent duplicate prompting.
-  bool _isAwaitingQuestion = false;
-  bool _isAwaitingConfirmation = false;
-  bool _hasPromptedForQuestion = false;
-
-  // Create a TTS instance.
-  final FlutterTts _flutterTts = FlutterTts();
+  // Add private flags to prevent double triggers and unwanted listening
+  late bool _isProcessingWakeWord;
+  late bool _isProcessingCommand;
 
   @override
   void initState() {
     super.initState();
-    _controller = CameraController(widget.camera, ResolutionPreset.max);
-    _initializeControllerFuture = _controller.initialize();
-
-    // Start the wake-word listener as soon as the screen is loaded.
-    _startListening();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    _questionController.dispose();
-    _speech.stop();
-    super.dispose();
-  }
-
-  // Helper method to speak text using TTS.
-  void _speak(String text) async {
-    await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setPitch(1.0);
-    await _flutterTts.speak(text);
-  }
-
-  /// Starts continuous listening for the wake phrase "Hey Lumi".
-  void _startListening() async {
-    print(
-      "Initializing continuous speech recognition for wake-word listening.",
-    );
-    bool available = await _speech.initialize();
-    if (available) {
-      print("Speech recognition initialized. Listening continuously.");
-      setState(() {
-        _isListening = true;
+    _isProcessingWakeWord = false;
+    _isProcessingCommand = false;
+    _cameraService = CameraService();
+    _cameraService.initialize(widget.camera);
+    _voiceService = VoiceService();
+    _voiceService.initTtsWebSocket('ws://192.168.1.124:8080/ws');
+    _sceneDescriptionService = SceneDescriptionService();
+    _sceneDescriptionService.speakSentence = (sentence) => _voiceService.speak(sentence);
+    _sceneDescriptionService.onQueueEmpty = () async {
+      final picture = await _cameraService.takePicture();
+      sendSceneDescriptionToAPI(
+        picture.path,
+        StreamController<String>()
+          ..stream.listen((chunk) {
+            _sceneDescriptionService.accumulateResponse(chunk);
+          }),
+      );
+    };
+    _sceneDescriptionService.takePictureAndSendToApi = () async {
+      final picture = await _cameraService.takePicture();
+      sendSceneDescriptionToAPI(
+        picture.path,
+        StreamController<String>()
+          ..stream.listen((chunk) {
+            _sceneDescriptionService.accumulateResponse(chunk);
+          }),
+      );
+    };
+    _speechService = SpeechService();
+    // Initialize speech recognition before TTS prompt
+    _speechService.initialize().then((available) {
+      debugPrint('SpeechService: initialize() returned: $available');
+      // Prompt user on startup after initialization
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _voiceService.speak("Say 'Hey Lumi' to get started.").then((_) {
+          _startListening();
+        });
       });
-      _speech.listen(
-        listenFor: const Duration(minutes: 60),
-        onResult: (result) {
-          String recognized = result.recognizedWords.toLowerCase();
-          print("Continuous listener recognized: $recognized");
-          if (recognized.contains("hey lumi") && !_hasPromptedForQuestion) {
-            print(
-              "Wake word detected. Stopping wake-word listener and prompting for question.",
+    });
+  }
+
+  /// Generic listening function for both wake word and command phases.
+  void _listenAndProcess({
+    required String promptOnNoMatch,
+    required String Function(String recognizedText, {required bool isFinal}) processResult,
+    Duration listenFor = const Duration(minutes: 60),
+    Duration pauseFor = const Duration(seconds: 4),
+  }) {
+    _speechService.listenForSpeech(
+      onResult: (recognizedText, isFinal) {
+        String processed = processResult(recognizedText, isFinal: isFinal);
+        if (processed == 'handled') {
+          // Do nothing, handled in callback
+        } else if (isFinal) {
+          debugPrint("No match detected, prompting user to try again.");
+          _voiceService.speak(promptOnNoMatch).then((_) {
+            _listenAndProcess(
+              promptOnNoMatch: promptOnNoMatch,
+              processResult: processResult,
+              listenFor: listenFor,
+              pauseFor: pauseFor,
             );
-            _hasPromptedForQuestion = true; // Prevent further prompts.
-            _speech.stop();
-            _promptForQuestion();
-          } else if (result.finalResult && !recognized.contains("hey lumi")) {
-            print("No wake word detected, clearing recognized text.");
-            setState(() {
-              _questionController.clear();
-            });
+          });
+        }
+      },
+      onError: (error) {
+        debugPrint("SpeechService error: $error");
+        _voiceService.speak(promptOnNoMatch).then((_) {
+          _listenAndProcess(
+            promptOnNoMatch: promptOnNoMatch,
+            processResult: processResult,
+            listenFor: listenFor,
+            pauseFor: pauseFor,
+          );
+        });
+      },
+      listenFor: listenFor,
+      pauseFor: pauseFor,
+      partialResults: true,
+    );
+  }
+
+  void _startListening() {
+    debugPrint("Entering wake-word listening phase.");
+    _isProcessingWakeWord = false;
+    _isProcessingCommand = false;
+    _listenForWakeWord();
+  }
+
+  void _listenForWakeWord() {
+    _listenAndProcess(
+      promptOnNoMatch: "I didn't catch that. Please say 'Hey Lumi' to begin.",
+      processResult: (recognized, {required bool isFinal}) {
+        String rec = recognized.toLowerCase();
+        debugPrint("Wake-word listener recognized: $rec (final: $isFinal)");
+        if (!_isProcessingWakeWord && rec.contains("hey lumi") && isFinal) {
+          _isProcessingWakeWord = true;
+          debugPrint("Wake word detected. Transitioning to command phase.");
+          _speechService.stopListening();
+          _voiceService.speak("Yes, how may I help you?").then((_) {
+            _listenForCommand();
+          });
+          return 'handled';
+        }
+        return '';
+      },
+      listenFor: const Duration(minutes: 60),
+      pauseFor: const Duration(seconds: 4),
+    );
+  }
+
+  void _listenForCommand() {
+    debugPrint("Entering command listening phase.");
+    _speechService.stopListening();
+    _isProcessingCommand = false;
+    const startCommands = [
+      "start scene description",
+      "start scene",
+      "scene description"
+    ];
+    const stopCommands = [
+      "stop scene description",
+      "stop scene",
+      "end scene description"
+    ];
+    _listenAndProcess(
+      promptOnNoMatch: "Sorry, I didn't hear a command. Please say your command now.",
+      processResult: (recognized, {required bool isFinal}) {
+        String command = recognized.toLowerCase().trim();
+        debugPrint("Command listener recognized: $command (final: $isFinal)");
+        if (!_isProcessingCommand && command.isNotEmpty && isFinal) {
+          _isProcessingCommand = true;
+          if (startCommands.any((c) => command.contains(c))) {
+            debugPrint("Starting scene description.");
+            _speechService.stopListening();
+            _sceneDescriptionService.startSceneDescription(
+              onComplete: () {
+                _voiceService.speak("Scene description finished.").then((_) {
+                  _startListening();
+                });
+              },
+            );
+            _voiceService.speak("Starting scene description.");
+            return 'handled';
           }
-        },
-      );
-    } else {
-      print("Speech recognition not available.");
-    }
-  }
-
-  /// Prompts the user by speaking "Yes, how may I help you?" and then listens for the user's question.
-  void _promptForQuestion() {
-    _speak("Yes, how may I help you?");
-    // Wait enough time for TTS to finish speaking.
-    Future.delayed(const Duration(seconds: 3), () {
-      _listenForQuestion();
-    });
-  }
-
-  /// Listens for the user's question.
-  void _listenForQuestion() async {
-    if (_isAwaitingQuestion) return;
-    setState(() {
-      _isAwaitingQuestion = true;
-    });
-    print("Listening for user's question...");
-    bool available = await _speech.initialize();
-    if (available) {
-      _speech.listen(
-        listenFor: const Duration(seconds: 10),
-        onResult: (result) {
-          if (result.finalResult) {
-            setState(() {
-              _isAwaitingQuestion = false;
+          if (stopCommands.any((c) => command.contains(c))) {
+            _speechService.stopListening();
+            _sceneDescriptionService.stopSceneDescription();
+            _voiceService.speak("Stopping scene description.").then((_) {
+              _startListening();
             });
-            // Remove any leading TTS prompt phrases from the recognized text.
-            String question = result.recognizedWords;
-            question =
-                question
-                    .replaceAll(
-                      RegExp(
-                        r'^(yes,?\s+how may i help you\s*)+',
-                        caseSensitive: false,
-                      ),
-                      '',
-                    )
-                    .trim();
-            print("User's question received after filtering: $question");
-            _currentQuestion = question;
-            _speech.stop();
-            // Reset wake-word flag for next time.
-            _hasPromptedForQuestion = false;
-            _confirmQuestion();
+            return 'handled';
           }
-        },
-      );
-    } else {
-      print("Speech recognition not available for listening to question.");
-      setState(() {
-        _isAwaitingQuestion = false;
-      });
-    }
-  }
-
-  /// Repeats the captured question for user confirmation.
-  void _confirmQuestion() {
-    _speak("Did you say: $_currentQuestion? Please say yes or no.");
-    // Wait 3 seconds for TTS to finish speaking before listening for confirmation.
-    Future.delayed(const Duration(seconds: 3), () {
-      _listenForConfirmation();
-    });
-  }
-
-  /// Listens for confirmation from the user.
-  /// If confirmed with "yes", takes a picture.
-  /// If the response explicitly starts with "no", clears the question and asks to repeat.
-  /// Otherwise, asks for confirmation again.
-  void _listenForConfirmation() async {
-    if (_isAwaitingConfirmation) return;
-    setState(() {
-      _isAwaitingConfirmation = true;
-    });
-    print("Listening for confirmation...");
-    bool available = await _speech.initialize();
-    if (available) {
-      _speech.listen(
-        listenFor: const Duration(seconds: 5),
-        onResult: (result) {
-          if (result.finalResult) {
-            setState(() {
-              _isAwaitingConfirmation = false;
-            });
-            String response = result.recognizedWords.toLowerCase().trim();
-            print("Confirmation response received: '$response'");
-            _speech.stop();
-            if (response.startsWith("yes")) {
-              _takePicture();
-            } else if (response.startsWith("no")) {
-              _currentQuestion = "";
-              _speak("Okay, please repeat your question.");
-              Future.delayed(const Duration(seconds: 3), () {
-                _listenForQuestion();
-              });
-            } else {
-              _speak("I didn't catch that. Please say yes or no.");
-              Future.delayed(const Duration(seconds: 3), () {
-                _listenForConfirmation();
-              });
-            }
-          }
-        },
-      );
-    } else {
-      print("Speech recognition not available for confirmation listening.");
-      setState(() {
-        _isAwaitingConfirmation = false;
-      });
-    }
-  }
-
-  /// Takes a picture, sends it and the confirmed question to the API,
-  /// and navigates to the display screen.
-  void _takePicture() async {
-    if (_isTakingPicture) return; // Prevent overlapping actions.
-
-    setState(() {
-      _isTakingPicture = true;
-    });
-
-    try {
-      print("Attempting to take picture...");
-      await _initializeControllerFuture;
-      final image = await _controller.takePicture();
-      print("Picture captured. Sending image and question to API.");
-      if (!mounted) return;
-
-      final responseController = StreamController<String>();
-      await sendImageAndMessageToAPI(
-        image.path,
-        responseController,
-        _currentQuestion,
-      );
-
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder:
-              (context) => DisplayPictureScreen(
-                imagePath: image.path,
-                responseStream: responseController.stream,
-              ),
-        ),
-      );
-    } catch (e) {
-      print('Error in _takePicture(): $e');
-    } finally {
-      setState(() {
-        _isTakingPicture = false;
-        _currentQuestion = "";
-      });
-      print("Picture taking process complete. Restarting wake-word listener.");
-      _startListening();
-    }
+          _speechService.stopListening();
+          _voiceService.speak("Sorry, I didn't recognize that command.").then((_) {
+            _startListening();
+          });
+          return 'handled';
+        }
+        return '';
+      },
+      listenFor: const Duration(seconds: 60),
+      pauseFor: const Duration(seconds: 4),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Take a Picture')),
-      body: SingleChildScrollView(
-        child: Column(
-          children: [
-            // Text input for user question.
-            // (The text field remains for manual input if needed,
-            // but prompt messages are no longer written into it.)
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: TextField(
-                controller: _questionController,
-                decoration: InputDecoration(
-                  labelText: 'Enter a question',
-                  hintText: 'What do you want to know?',
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (text) {
-                  setState(() {
-                    _isQuestionEmpty = text.isEmpty;
-                  });
-                },
+      appBar: AppBar(
+        title: const Text('Lumi Mate'),
+        backgroundColor: Colors.black,
+      ),
+      body: Stack(
+        children: [
+          FutureBuilder<void>(
+            future: _cameraService.initializeFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.done) {
+                return CameraPreview(_cameraService.controller);
+              } else {
+                return const Center(child: CircularProgressIndicator());
+              }
+            },
+          ),
+          // Scene description status indicator
+          Positioned(
+            top: 20,
+            right: 20,
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _sceneDescriptionService.isActive ? Colors.green : Colors.red,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    _sceneDescriptionService.isActive
+                        ? Icons.record_voice_over
+                        : Icons.mic_off,
+                    color: Colors.white,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _sceneDescriptionService.isActive ? 'Active' : 'Inactive',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 20),
-            // Camera preview.
-            FutureBuilder<void>(
-              future: _initializeControllerFuture,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.done) {
-                  return CameraPreview(_controller);
-                } else {
-                  return const Center(child: CircularProgressIndicator());
-                }
-              },
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _takePicture,
-        child: const Icon(Icons.camera_alt),
+          ),
+          // Response stream listener
+          StreamBuilder<String>(
+            stream: _sceneDescriptionService.responseStream,
+            builder: (context, snapshot) {
+              if (snapshot.hasData) {
+                return Positioned(
+                  bottom: 20,
+                  left: 20,
+                  right: 20,
+                  child: Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withAlpha((0.7 * 255).toInt()),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: StreamBuilder<String>(
+                      stream: _sceneDescriptionService.responseStream,
+                      builder: (context, snapshot) {
+                        return Text(
+                          snapshot.data ?? '',
+                          style: const TextStyle(color: Colors.white),
+                        );
+                      },
+                    ),
+                  ),
+                );
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+        ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _sceneDescriptionService.dispose();
+    _voiceService.dispose();
+    _cameraService.dispose();
+    _speechService.stopListening();
+    super.dispose();
   }
 }

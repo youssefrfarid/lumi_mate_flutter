@@ -65,6 +65,7 @@ class SceneDescriptionService {
     isSceneDescriptionActive = true;
     _onSceneDescriptionComplete = onComplete;
     // Immediately trigger the first picture + API call if callback is set
+    debugPrint('SceneDescriptionService: Taking first picture for scene description.');
     takePictureAndSendToApi?.call();
   }
 
@@ -88,5 +89,16 @@ class SceneDescriptionService {
 
   set speakSentenceCallback(Future<void> Function(String) callback) {
     speakSentence = callback;
+  }
+
+  void onQueueEmptyCallback() {
+    if (_isSpeaking) {
+      debugPrint('SceneDescriptionService: Tried to take a new picture while still speaking previous description! Waiting...');
+      // Optionally, you could re-arm the timer for a short period here
+      sceneDescriptionTimer = Timer(const Duration(seconds: 1), onQueueEmpty!);
+      return;
+    }
+    debugPrint('SceneDescriptionService: Taking next picture for scene description.');
+    takePictureAndSendToApi?.call();
   }
 }

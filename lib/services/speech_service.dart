@@ -17,7 +17,7 @@ class SpeechService {
     required void Function(String recognizedText, bool isFinal) onResult,
     void Function(String error)? onError,
     Duration listenFor = const Duration(seconds: 60),
-    Duration pauseFor = const Duration(seconds: 2),
+    Duration pauseFor = const Duration(seconds: 3),
     bool partialResults = true,
   }) async {
     if (!_speech.isAvailable) {

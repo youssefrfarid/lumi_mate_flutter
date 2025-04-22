@@ -27,6 +27,8 @@ class TakePictureScreenState extends State<TakePictureScreen> {
   late bool _isProcessingWakeWord;
   late bool _isProcessingCommand;
 
+  String? _lastFaceImagePath;
+
   @override
   void initState() {
     super.initState();
@@ -76,7 +78,7 @@ class TakePictureScreenState extends State<TakePictureScreen> {
     required String promptOnNoMatch,
     required String Function(String recognizedText, {required bool isFinal}) processResult,
     Duration listenFor = const Duration(minutes: 60),
-    Duration pauseFor = const Duration(seconds: 4),
+    Duration pauseFor = const Duration(seconds: 3),
   }) {
     _speechService.listenForSpeech(
       onResult: (recognizedText, isFinal) {
@@ -141,25 +143,65 @@ class TakePictureScreenState extends State<TakePictureScreen> {
     );
   }
 
+  void _listenForStopDuringSceneDescription(VoidCallback onStop) {
+    debugPrint("Listening for stop command during scene description...");
+    _speechService.listenForSpeech(
+      onResult: (recognizedText, isFinal) {
+        String command = recognizedText.toLowerCase().trim();
+        debugPrint("Scene description stop listener recognized: $command (final: $isFinal)");
+        if (isFinal && (command.contains("stop") || command.contains("end scene description") || command.contains("stop scene"))) {
+          debugPrint("Stop command detected during scene description.");
+          _speechService.stopListening();
+          onStop();
+        }
+      },
+      onError: (error) {
+        debugPrint("Scene description stop listener error: $error");
+      },
+      listenFor: const Duration(minutes: 10),
+      pauseFor: const Duration(milliseconds: 500),
+      partialResults: true,
+    );
+  }
+
   void _listenForCommand() {
-    debugPrint("Entering command listening phase.");
-    _speechService.stopListening();
-    _isProcessingCommand = false;
-    const startCommands = [
-      "start scene description",
-      "start scene",
-      "scene description"
-    ];
-    const stopCommands = [
-      "stop scene description",
-      "stop scene",
-      "end scene description"
-    ];
     _listenAndProcess(
-      promptOnNoMatch: "Sorry, I didn't hear a command. Please say your command now.",
-      processResult: (recognized, {required bool isFinal}) {
-        String command = recognized.toLowerCase().trim();
-        debugPrint("Command listener recognized: $command (final: $isFinal)");
+      promptOnNoMatch: "Please say a command like 'Describe scene' or 'Who is this?'",
+      processResult: (command, {required bool isFinal}) {
+        command = command.toLowerCase().trim();
+
+        // Face recognition
+        if (command == "who is this") {
+          _speechService.stopListening();
+          _handleFaceRecognition();
+          return 'handled';
+        }
+
+        // Face registration
+        if (command.startsWith("yes, this is ")) {
+          final name = command.replaceFirst("yes, this is ", "").trim();
+          if (_lastFaceImagePath != null && name.isNotEmpty) {
+            _speechService.stopListening();
+            _handleFaceRegistration(name);
+          } else {
+            _voiceService.speak("No face image available for registration. Please try again.");
+          }
+          return 'handled';
+        }
+
+        // ...existing commands...
+
+        const startCommands = [
+          "start scene description",
+          "start scene",
+          "scene description"
+        ];
+        const stopCommands = [
+          "stop scene description",
+          "stop scene",
+          "end scene description"
+        ];
+
         if (!_isProcessingCommand && command.isNotEmpty && isFinal) {
           _isProcessingCommand = true;
           if (startCommands.any((c) => command.contains(c))) {
@@ -172,7 +214,16 @@ class TakePictureScreenState extends State<TakePictureScreen> {
                 });
               },
             );
-            _voiceService.speak("Starting scene description.");
+            _voiceService.speak("Starting scene description.").then((_) {
+              // Removed AirPod/media button stop functionality
+            });
+            // Optionally, keep _listenForStopDuringSceneDescription for voice stop
+            _listenForStopDuringSceneDescription(() {
+              _sceneDescriptionService.stopSceneDescription();
+              _voiceService.speak("Stopping scene description.").then((_) {
+                _startListening();
+              });
+            });
             return 'handled';
           }
           if (stopCommands.any((c) => command.contains(c))) {
@@ -194,6 +245,44 @@ class TakePictureScreenState extends State<TakePictureScreen> {
       listenFor: const Duration(seconds: 60),
       pauseFor: const Duration(seconds: 4),
     );
+  }
+
+  Future<void> _handleFaceRecognition() async {
+    final picture = await _cameraService.takePicture();
+    _lastFaceImagePath = picture.path;
+
+    final name = await recognizeFace(
+      apiUrl: 'http://192.168.1.124:4000/recognize',
+      imagePath: picture.path,
+    );
+
+    if (name != 'Unknown Person' && name != 'No faces detected') {
+      await _voiceService.speak("This is $name.");
+    } else if (name == 'No faces detected') {
+      await _voiceService.speak("No faces detected in the image.");
+    } else {
+      await _voiceService.speak(
+        "I don't recognize this person. If you know them, say 'Yes, this is' followed by their name to register."
+      );
+      // The app will continue listening for the registration command
+    }
+  }
+
+  Future<void> _handleFaceRegistration(String name) async {
+    if (_lastFaceImagePath == null) {
+      await _voiceService.speak("No image available to register. Please try again.");
+      return;
+    }
+    final success = await registerFace(
+      apiUrl: 'http://192.168.1.124:4000/register',
+      imagePath: _lastFaceImagePath!,
+      name: name,
+    );
+    if (success) {
+      await _voiceService.speak("Face registered as $name.");
+    } else {
+      await _voiceService.speak("Failed to register face.");
+    }
   }
 
   @override

@@ -31,10 +31,10 @@ Future<void> sendSceneDescriptionToAPI(
         3. Notable environmental features
         4. Any text or signs that might be important
         
-        Speak directly to the user as if you're their eyes, using phrases like "In front of you" or "To your left".
-        Keep descriptions concise but informative.
-        If you notice any potential dangers, mention them first.
-        """,
+        Speak directly to the user as if you're their eyes, using phrases like 'In front of you' or 'To your left'.
+        
+        Keep descriptions concise (ideally 2-3 sentences), focusing only on the most important objects, hazards, and features. Avoid excessive detail or long descriptions unless there is a danger present.
+        If you notice any potential dangers, mention them first.""",
       },
       {
         "role": "user",
@@ -186,5 +186,132 @@ Future<void> sendImageAndMessageToAPI(
     );
   } catch (e) {
     debugPrint('Error sending image and message to API: $e');
+  }
+}
+
+// Gemini multimodal scene description using Vertex AI
+Future<String> getGeminiSceneDescription({
+  required String accessToken,
+  required String projectId,
+  required String imagePath,
+  String location = 'us-central1',
+}) async {
+  final url = 'https://$location-aiplatform.googleapis.com/v1/projects/$projectId/locations/$location/publishers/google/models/gemini-2.0-flash-001:generateContent';
+
+  final imageBytes = await File(imagePath).readAsBytes();
+  final imageBase64 = base64Encode(imageBytes);
+
+  final requestBody = {
+    'contents': [
+      {
+        'role': 'user',
+        'parts': [
+          {
+            'text': "Describe this scene for a visually impaired user in 2-3 concise sentences. Focus on important objects, hazards, and features. Avoid unnecessary detail unless there is a danger."
+          },
+          {
+            'inlineData': {
+              'mimeType': 'image/jpeg',
+              'data': imageBase64,
+            }
+          }
+        ]
+      }
+    ],
+    'generationConfig': {
+      'temperature': 0.2,
+      'maxOutputTokens': 256,
+    }
+  };
+
+  final response = await http.post(
+    Uri.parse(url),
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer $accessToken',
+    },
+    body: jsonEncode(requestBody),
+  );
+
+  if (response.statusCode == 200) {
+    final decoded = jsonDecode(response.body);
+    final description = decoded['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? 'No description found.';
+    return description;
+  } else {
+    throw Exception('Gemini API error: ${response.statusCode} ${response.body}');
+  }
+}
+
+// Gemini multimodal scene description using FastAPI backend
+Future<String> getGeminiSceneDescriptionViaBackend({
+  required String backendUrl,
+  required String imagePath,
+  String prompt = "Describe this scene for a visually impaired user in 2-3 concise sentences. Focus on important objects, hazards, and features. Avoid unnecessary detail unless there is a danger.",
+}) async {
+  final imageBytes = await File(imagePath).readAsBytes();
+  final imageBase64 = base64Encode(imageBytes);
+
+  final response = await http.post(
+    Uri.parse(backendUrl),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({
+      'text': prompt,
+      'image_base64': imageBase64,
+    }),
+  );
+
+  if (response.statusCode == 200) {
+    final decoded = jsonDecode(response.body);
+    final description = decoded['result'] ?? 'No description found.';
+    return description;
+  } else {
+    throw Exception('Backend Gemini API error: ${response.statusCode} ${response.body}');
+  }
+}
+
+// Recognize face using AWS Rekognition API
+Future<String> recognizeFace({
+  required String apiUrl,
+  required String imagePath,
+}) async {
+  var request = http.MultipartRequest('POST', Uri.parse(apiUrl));
+  request.files.add(await http.MultipartFile.fromPath('image', imagePath));
+
+  final streamedResponse = await request.send();
+  final response = await http.Response.fromStream(streamedResponse);
+
+  if (response.statusCode == 200) {
+    final Map<String, dynamic> data = jsonDecode(response.body);
+    final results = data['results'] as List<dynamic>?;
+    if (results != null && results.isNotEmpty) {
+      final firstResult = results.first;
+      final name = firstResult['name'] ?? 'Unknown Person';
+      return name;
+    } else {
+      return 'No faces detected';
+    }
+  } else {
+    throw Exception('Face recognition API error: ${response.statusCode} ${response.body}');
+  }
+}
+
+// Register face using AWS Rekognition API
+Future<bool> registerFace({
+  required String apiUrl,
+  required String imagePath,
+  required String name,
+}) async {
+  var request = http.MultipartRequest('POST', Uri.parse(apiUrl));
+  request.files.add(await http.MultipartFile.fromPath('image', imagePath));
+  request.fields['name'] = name;
+
+  final streamedResponse = await request.send();
+  final response = await http.Response.fromStream(streamedResponse);
+
+  if (response.statusCode == 200) {
+    final Map<String, dynamic> data = jsonDecode(response.body);
+    return data['message'] != null && data['message'].toString().contains('registered successfully');
+  } else {
+    throw Exception('Face registration API error: ${response.statusCode} ${response.body}');
   }
 }

@@ -15,7 +15,7 @@ Future<void> sendSceneDescriptionToAPI(
     Uint8List imageBytes = await imageFile.readAsBytes();
     String base64Image = base64Encode(imageBytes);
 
-    var url = Uri.parse('http://192.168.1.156:1234/v1/chat/completions');
+    var url = Uri.parse('http://172.20.10.2:1234/v1/chat/completions');
     var headers = {'Content-Type': 'application/json'};
 
     var messages = [
@@ -109,7 +109,7 @@ Future<void> sendImageAndMessageToAPI(
     Uint8List imageBytes = await imageFile.readAsBytes();
     String base64Image = base64Encode(imageBytes);
 
-    var url = Uri.parse('http://192.168.1.156:1234/v1/chat/completions');
+    var url = Uri.parse('http://172.20.10.2:1234/v1/chat/completions');
     var headers = {'Content-Type': 'application/json'};
 
     var messages = [
@@ -196,7 +196,8 @@ Future<String> getGeminiSceneDescription({
   required String imagePath,
   String location = 'us-central1',
 }) async {
-  final url = 'https://$location-aiplatform.googleapis.com/v1/projects/$projectId/locations/$location/publishers/google/models/gemini-2.0-flash-001:generateContent';
+  final url =
+      'https://$location-aiplatform.googleapis.com/v1/projects/$projectId/locations/$location/publishers/google/models/gemini-2.0-flash-001:generateContent';
 
   final imageBytes = await File(imagePath).readAsBytes();
   final imageBase64 = base64Encode(imageBytes);
@@ -207,21 +208,16 @@ Future<String> getGeminiSceneDescription({
         'role': 'user',
         'parts': [
           {
-            'text': "Describe this scene for a visually impaired user in 2-3 concise sentences. Focus on important objects, hazards, and features. Avoid unnecessary detail unless there is a danger."
+            'text':
+                "Describe this scene for a visually impaired user in 2-3 concise sentences. Focus on important objects, hazards, and features. Avoid unnecessary detail unless there is a danger.",
           },
           {
-            'inlineData': {
-              'mimeType': 'image/jpeg',
-              'data': imageBase64,
-            }
-          }
-        ]
-      }
+            'inlineData': {'mimeType': 'image/jpeg', 'data': imageBase64},
+          },
+        ],
+      },
     ],
-    'generationConfig': {
-      'temperature': 0.2,
-      'maxOutputTokens': 256,
-    }
+    'generationConfig': {'temperature': 0.2, 'maxOutputTokens': 256},
   };
 
   final response = await http.post(
@@ -235,10 +231,14 @@ Future<String> getGeminiSceneDescription({
 
   if (response.statusCode == 200) {
     final decoded = jsonDecode(response.body);
-    final description = decoded['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? 'No description found.';
+    final description =
+        decoded['candidates']?[0]?['content']?['parts']?[0]?['text'] ??
+        'No description found.';
     return description;
   } else {
-    throw Exception('Gemini API error: ${response.statusCode} ${response.body}');
+    throw Exception(
+      'Gemini API error: ${response.statusCode} ${response.body}',
+    );
   }
 }
 
@@ -246,7 +246,8 @@ Future<String> getGeminiSceneDescription({
 Future<String> getGeminiSceneDescriptionViaBackend({
   required String backendUrl,
   required String imagePath,
-  String prompt = "Describe this scene for a visually impaired user in 2-3 concise sentences. Focus on important objects, hazards, and features. Avoid unnecessary detail unless there is a danger.",
+  String prompt =
+      "Describe this scene for a visually impaired user in 2-3 concise sentences. Focus on important objects, hazards, and features. Avoid unnecessary detail unless there is a danger.",
 }) async {
   final imageBytes = await File(imagePath).readAsBytes();
   final imageBase64 = base64Encode(imageBytes);
@@ -254,10 +255,7 @@ Future<String> getGeminiSceneDescriptionViaBackend({
   final response = await http.post(
     Uri.parse(backendUrl),
     headers: {'Content-Type': 'application/json'},
-    body: jsonEncode({
-      'text': prompt,
-      'image_base64': imageBase64,
-    }),
+    body: jsonEncode({'text': prompt, 'image_base64': imageBase64}),
   );
 
   if (response.statusCode == 200) {
@@ -265,7 +263,9 @@ Future<String> getGeminiSceneDescriptionViaBackend({
     final description = decoded['result'] ?? 'No description found.';
     return description;
   } else {
-    throw Exception('Backend Gemini API error: ${response.statusCode} ${response.body}');
+    throw Exception(
+      'Backend Gemini API error: ${response.statusCode} ${response.body}',
+    );
   }
 }
 
@@ -291,7 +291,9 @@ Future<String> recognizeFace({
       return 'No faces detected';
     }
   } else {
-    throw Exception('Face recognition API error: ${response.statusCode} ${response.body}');
+    throw Exception(
+      'Face recognition API error: ${response.statusCode} ${response.body}',
+    );
   }
 }
 
@@ -310,8 +312,11 @@ Future<bool> registerFace({
 
   if (response.statusCode == 200) {
     final Map<String, dynamic> data = jsonDecode(response.body);
-    return data['message'] != null && data['message'].toString().contains('registered successfully');
+    return data['message'] != null &&
+        data['message'].toString().contains('registered successfully');
   } else {
-    throw Exception('Face registration API error: ${response.statusCode} ${response.body}');
+    throw Exception(
+      'Face registration API error: ${response.statusCode} ${response.body}',
+    );
   }
 }

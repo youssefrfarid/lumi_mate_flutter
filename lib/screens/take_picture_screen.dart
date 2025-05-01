@@ -1,5 +1,6 @@
 // lib/screens/take_picture_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import '../services/voice_service.dart';
 import '../services/camera_service.dart';
@@ -37,9 +38,10 @@ class TakePictureScreenState extends State<TakePictureScreen> {
     _cameraService = CameraService();
     _cameraService.initialize(widget.camera);
     _voiceService = VoiceService();
-    _voiceService.initTtsWebSocket('ws://192.168.1.124:8080/ws');
+    _voiceService.initTtsWebSocket('ws://172.20.10.2:8000/ws');
     _sceneDescriptionService = SceneDescriptionService();
-    _sceneDescriptionService.speakSentence = (sentence) => _voiceService.speak(sentence);
+    _sceneDescriptionService.speakSentence =
+        (sentence) => _voiceService.speak(sentence);
     _sceneDescriptionService.onQueueEmpty = () async {
       final picture = await _cameraService.takePicture();
       sendSceneDescriptionToAPI(
@@ -61,14 +63,13 @@ class TakePictureScreenState extends State<TakePictureScreen> {
       );
     };
     _speechService = SpeechService();
-    // Initialize speech recognition before TTS prompt
     _speechService.initialize().then((available) {
       debugPrint('SpeechService: initialize() returned: $available');
-      // Prompt user on startup after initialization
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _voiceService.speak("Say 'Hey Lumi' to get started.").then((_) {
-          _startListening();
-        });
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await _voiceService.speak(
+          "You are on the main screen. There are four large buttons from top to bottom: Describe Scene, Who is this, Register Face, and Stop Scene Description. You can tap a button or say 'Hey Lumi' at any time to use voice commands. Listening for 'Hey Lumi' now.",
+        );
+        _startListening();
       });
     });
   }
@@ -76,7 +77,8 @@ class TakePictureScreenState extends State<TakePictureScreen> {
   /// Generic listening function for both wake word and command phases.
   void _listenAndProcess({
     required String promptOnNoMatch,
-    required String Function(String recognizedText, {required bool isFinal}) processResult,
+    required String Function(String recognizedText, {required bool isFinal})
+    processResult,
     Duration listenFor = const Duration(minutes: 60),
     Duration pauseFor = const Duration(seconds: 3),
   }) {
@@ -121,6 +123,87 @@ class TakePictureScreenState extends State<TakePictureScreen> {
     _listenForWakeWord();
   }
 
+  void _onDescribeScene() {
+    _pauseListening();
+    HapticFeedback.mediumImpact();
+    _sceneDescriptionService.startSceneDescription(
+      onComplete: () {
+        _voiceService.speak("Scene description finished.");
+        _startListening(); // Resume listening after action
+      },
+    );
+    _voiceService.speak("Starting scene description.");
+  }
+
+  void _onWhoIsThis() async {
+    _pauseListening();
+    HapticFeedback.mediumImpact();
+    final picture = await _cameraService.takePicture();
+    _lastFaceImagePath = picture.path;
+    final name = await recognizeFace(
+      apiUrl: 'http://172.20.10.2:4000/recognize',
+      imagePath: picture.path,
+    );
+    if (name != 'Unknown Person' && name != 'No faces detected') {
+      await _voiceService.speak("This is $name.");
+    } else if (name == 'No faces detected') {
+      await _voiceService.speak("No faces detected in the image.");
+    } else {
+      await _voiceService.speak(
+        "I don't recognize this person. If you know them, tap Register Face or say 'Register Face' to add them.",
+      );
+    }
+    _startListening(); // Resume listening after action
+  }
+
+  void _onRegisterFace() async {
+    _pauseListening();
+    HapticFeedback.mediumImpact();
+    final picture = await _cameraService.takePicture();
+    _lastFaceImagePath = picture.path;
+    await _voiceService.speak("Who is this?");
+    _listenAndProcess(
+      promptOnNoMatch: "Please say the name to register.",
+      processResult: (recognized, {required bool isFinal}) {
+        if (isFinal && recognized.trim().isNotEmpty) {
+          final name = recognized.trim();
+          _speechService.stopListening();
+          registerFace(
+            apiUrl: 'http://172.20.10.2:4000/register',
+            imagePath: _lastFaceImagePath!,
+            name: name,
+          ).then((success) async {
+            if (success) {
+              await _voiceService.speak("Face registered.");
+            } else {
+              await _voiceService.speak("Failed to register face.");
+            }
+            _startListening();
+          });
+          return 'handled';
+        }
+        return '';
+      },
+      listenFor: const Duration(seconds: 10),
+      pauseFor: const Duration(seconds: 2),
+    );
+  }
+
+  void _onStopSceneDescription() {
+    _pauseListening();
+    HapticFeedback.mediumImpact();
+    _sceneDescriptionService.stopSceneDescription();
+    _voiceService.speak("Stopping scene description.");
+    _startListening();
+  }
+
+  void _pauseListening() {
+    _speechService.stopListening();
+    _isProcessingWakeWord = false;
+    _isProcessingCommand = false;
+  }
+
+  @override
   void _listenForWakeWord() {
     _listenAndProcess(
       promptOnNoMatch: "I didn't catch that. Please say 'Hey Lumi' to begin.",
@@ -143,37 +226,17 @@ class TakePictureScreenState extends State<TakePictureScreen> {
     );
   }
 
-  void _listenForStopDuringSceneDescription(VoidCallback onStop) {
-    debugPrint("Listening for stop command during scene description...");
-    _speechService.listenForSpeech(
-      onResult: (recognizedText, isFinal) {
-        String command = recognizedText.toLowerCase().trim();
-        debugPrint("Scene description stop listener recognized: $command (final: $isFinal)");
-        if (isFinal && (command.contains("stop") || command.contains("end scene description") || command.contains("stop scene"))) {
-          debugPrint("Stop command detected during scene description.");
-          _speechService.stopListening();
-          onStop();
-        }
-      },
-      onError: (error) {
-        debugPrint("Scene description stop listener error: $error");
-      },
-      listenFor: const Duration(minutes: 10),
-      pauseFor: const Duration(milliseconds: 500),
-      partialResults: true,
-    );
-  }
-
   void _listenForCommand() {
     _listenAndProcess(
-      promptOnNoMatch: "Please say a command like 'Describe scene' or 'Who is this?'",
+      promptOnNoMatch:
+          "Please say a command like 'Describe scene' or 'Who is this?'",
       processResult: (command, {required bool isFinal}) {
         command = command.toLowerCase().trim();
 
         // Face recognition
         if (command == "who is this") {
           _speechService.stopListening();
-          _handleFaceRecognition();
+          _onWhoIsThis();
           return 'handled';
         }
 
@@ -182,24 +245,28 @@ class TakePictureScreenState extends State<TakePictureScreen> {
           final name = command.replaceFirst("yes, this is ", "").trim();
           if (_lastFaceImagePath != null && name.isNotEmpty) {
             _speechService.stopListening();
-            _handleFaceRegistration(name);
+            // You may want to call a registration handler here
+            _voiceService.speak(
+              "Registering $name is not fully implemented in this button flow.",
+            );
           } else {
-            _voiceService.speak("No face image available for registration. Please try again.");
+            _voiceService.speak(
+              "No face image available for registration. Please try again.",
+            );
           }
           return 'handled';
         }
 
-        // ...existing commands...
-
+        // Scene description
         const startCommands = [
           "start scene description",
           "start scene",
-          "scene description"
+          "scene description",
         ];
         const stopCommands = [
           "stop scene description",
           "stop scene",
-          "end scene description"
+          "end scene description",
         ];
 
         if (!_isProcessingCommand && command.isNotEmpty && isFinal) {
@@ -214,28 +281,23 @@ class TakePictureScreenState extends State<TakePictureScreen> {
                 });
               },
             );
-            _voiceService.speak("Starting scene description.").then((_) {
-              // Removed AirPod/media button stop functionality
-            });
-            // Optionally, keep _listenForStopDuringSceneDescription for voice stop
-            _listenForStopDuringSceneDescription(() {
-              _sceneDescriptionService.stopSceneDescription();
-              _voiceService.speak("Stopping scene description.").then((_) {
-                _startListening();
-              });
-            });
+            HapticFeedback.mediumImpact();
+            _voiceService.speak("Starting scene description.");
             return 'handled';
           }
           if (stopCommands.any((c) => command.contains(c))) {
             _speechService.stopListening();
             _sceneDescriptionService.stopSceneDescription();
+            HapticFeedback.mediumImpact();
             _voiceService.speak("Stopping scene description.").then((_) {
               _startListening();
             });
             return 'handled';
           }
           _speechService.stopListening();
-          _voiceService.speak("Sorry, I didn't recognize that command.").then((_) {
+          _voiceService.speak("Sorry, I didn't recognize that command.").then((
+            _,
+          ) {
             _startListening();
           });
           return 'handled';
@@ -247,119 +309,109 @@ class TakePictureScreenState extends State<TakePictureScreen> {
     );
   }
 
-  Future<void> _handleFaceRecognition() async {
-    final picture = await _cameraService.takePicture();
-    _lastFaceImagePath = picture.path;
-
-    final name = await recognizeFace(
-      apiUrl: 'http://192.168.1.124:4000/recognize',
-      imagePath: picture.path,
-    );
-
-    if (name != 'Unknown Person' && name != 'No faces detected') {
-      await _voiceService.speak("This is $name.");
-    } else if (name == 'No faces detected') {
-      await _voiceService.speak("No faces detected in the image.");
-    } else {
-      await _voiceService.speak(
-        "I don't recognize this person. If you know them, say 'Yes, this is' followed by their name to register."
-      );
-      // The app will continue listening for the registration command
-    }
-  }
-
-  Future<void> _handleFaceRegistration(String name) async {
-    if (_lastFaceImagePath == null) {
-      await _voiceService.speak("No image available to register. Please try again.");
-      return;
-    }
-    final success = await registerFace(
-      apiUrl: 'http://192.168.1.124:4000/register',
-      imagePath: _lastFaceImagePath!,
-      name: name,
-    );
-    if (success) {
-      await _voiceService.speak("Face registered as $name.");
-    } else {
-      await _voiceService.speak("Failed to register face.");
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Lumi Mate'),
+        title: const Text('Lumi Mate', style: TextStyle(color: Colors.white)),
         backgroundColor: Colors.black,
       ),
-      body: Stack(
+      body: Column(
         children: [
-          FutureBuilder<void>(
-            future: _cameraService.initializeFuture,
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.done) {
-                return CameraPreview(_cameraService.controller);
-              } else {
-                return const Center(child: CircularProgressIndicator());
-              }
-            },
-          ),
-          // Scene description status indicator
-          Positioned(
-            top: 20,
-            right: 20,
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: _sceneDescriptionService.isActive ? Colors.green : Colors.red,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    _sceneDescriptionService.isActive
-                        ? Icons.record_voice_over
-                        : Icons.mic_off,
-                    color: Colors.white,
+          Expanded(
+            child: Semantics(
+              label: 'Describe Scene',
+              button: true,
+              child: TextButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.zero,
                   ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _sceneDescriptionService.isActive ? 'Active' : 'Inactive',
-                    style: const TextStyle(color: Colors.white),
+                  textStyle: const TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
                   ),
-                ],
+                ),
+                onPressed: _onDescribeScene,
+                child: const Center(
+                  child: Text('Describe Scene', textAlign: TextAlign.center),
+                ),
               ),
             ),
           ),
-          // Response stream listener
-          StreamBuilder<String>(
-            stream: _sceneDescriptionService.responseStream,
-            builder: (context, snapshot) {
-              if (snapshot.hasData) {
-                return Positioned(
-                  bottom: 20,
-                  left: 20,
-                  right: 20,
-                  child: Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withAlpha((0.7 * 255).toInt()),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: StreamBuilder<String>(
-                      stream: _sceneDescriptionService.responseStream,
-                      builder: (context, snapshot) {
-                        return Text(
-                          snapshot.data ?? '',
-                          style: const TextStyle(color: Colors.white),
-                        );
-                      },
-                    ),
+          Expanded(
+            child: Semantics(
+              label: 'Who is this',
+              button: true,
+              child: TextButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.zero,
                   ),
-                );
-              }
-              return const SizedBox.shrink();
-            },
+                  textStyle: const TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                onPressed: _onWhoIsThis,
+                child: const Center(
+                  child: Text('Who is this?', textAlign: TextAlign.center),
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Semantics(
+              label: 'Register Face',
+              button: true,
+              child: TextButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.zero,
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                onPressed: _onRegisterFace,
+                child: const Center(
+                  child: Text('Register Face', textAlign: TextAlign.center),
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Semantics(
+              label: 'Stop Scene Description',
+              button: true,
+              child: TextButton(
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.red,
+                  foregroundColor: Colors.white,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.zero,
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                onPressed: _onStopSceneDescription,
+                child: const Center(
+                  child: Text(
+                    'Stop Scene Description',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),

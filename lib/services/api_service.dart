@@ -15,7 +15,7 @@ Future<void> sendSceneDescriptionToAPI(
     Uint8List imageBytes = await imageFile.readAsBytes();
     String base64Image = base64Encode(imageBytes);
 
-    var url = Uri.parse('http://172.20.10.2:1234/v1/chat/completions');
+    var url = Uri.parse('http://192.168.1.125:1234/v1/chat/completions');
     var headers = {'Content-Type': 'application/json'};
 
     var messages = [
@@ -51,7 +51,7 @@ Future<void> sendSceneDescriptionToAPI(
     ];
 
     var body = jsonEncode({
-      "model": "minicpm-o-2_6",
+      "model": "openbmb/minicpm-o-2_6",
       "messages": messages,
       "temperature": 0.3,
       "max_tokens": -1,
@@ -109,7 +109,7 @@ Future<void> sendImageAndMessageToAPI(
     Uint8List imageBytes = await imageFile.readAsBytes();
     String base64Image = base64Encode(imageBytes);
 
-    var url = Uri.parse('http://172.20.10.2:1234/v1/chat/completions');
+    var url = Uri.parse('http://192.168.1.125:1234/v1/chat/completions');
     var headers = {'Content-Type': 'application/json'};
 
     var messages = [
@@ -142,7 +142,7 @@ Future<void> sendImageAndMessageToAPI(
     ];
 
     var body = jsonEncode({
-      "model": "minicpm-o-2_6",
+      "model": "openbmb/minicpm-o-2_6",
       "messages": messages,
       "temperature": 0.3,
       "max_tokens": -1,
@@ -318,5 +318,89 @@ Future<bool> registerFace({
     throw Exception(
       'Face registration API error: ${response.statusCode} ${response.body}',
     );
+  }
+}
+
+// Product summary with findings (image + findings to VLM)
+Future<void> getProductSummaryWithFindings(
+  String imagePath,
+  String findings,
+  StreamController<String> controller,
+) async {
+  try {
+    File imageFile = File(imagePath);
+    Uint8List imageBytes = await imageFile.readAsBytes();
+    String base64Image = base64Encode(imageBytes);
+
+    var url = Uri.parse(
+      'http://192.168.1.125:1234/v1/chat/completions',
+    ); // Use your VLM endpoint
+    var headers = {'Content-Type': 'application/json'};
+
+    var messages = [
+      {
+        "role": "system",
+        "content":
+            "You are a helpful assistant for visually impaired users. You will receive product images and extracted findings (text, labels, web info). Use both the image and findings to identify the product. Your response must be in a purely conversational, natural language form suitable for text-to-speech, without any markdown, markup, or formatting symbols. Do not use headings, lists, or special characters—just plain sentences. Limit your response to 2-3 concise sentences. Focus on what the product is and only the most important details, such as name, type, flavor, weight, and any special or limited edition information. Do not include unnecessary information or long explanations. If you cannot identify the product, say so. If the image is blurry or unclear, mention that as well. Avoid using phrases like 'I see' or 'I can tell you that'. Keep it withing 2-3 sentences. If you notice any potential dangers, mention them first.",
+      },
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": findings},
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/jpeg;base64,$base64Image",
+              "detail": "high",
+            },
+          },
+        ],
+      },
+    ];
+
+    var body = jsonEncode({
+      "model": "openbmb/minicpm-o-2_6",
+      "messages": messages,
+      "temperature": 0.3,
+      "max_tokens": -1,
+      "stream": true,
+    });
+
+    var client = http.Client();
+    var request =
+        http.Request('POST', url)
+          ..headers.addAll(headers)
+          ..body = body;
+
+    var streamedResponse = await client.send(request);
+    streamedResponse.stream.listen(
+      (List<int> chunk) {
+        String chunkStr = utf8.decode(chunk).trim();
+        if (chunkStr == '[DONE]') {
+          controller.add('[DONE]');
+          return;
+        }
+        if (chunkStr.startsWith('data: ')) {
+          chunkStr = chunkStr.replaceFirst('data: ', '');
+        }
+        try {
+          Map<String, dynamic> parsedChunk = jsonDecode(chunkStr);
+          var content = parsedChunk['choices'][0]['delta']['content'];
+          if (content != null) {
+            controller.add(content);
+          }
+        } catch (e) {
+          debugPrint('Error parsing chunk: $e');
+        }
+      },
+      onError: (error) {
+        debugPrint('Error while streaming response: $error');
+      },
+      onDone: () {
+        controller.close();
+      },
+    );
+  } catch (e) {
+    debugPrint('Error sending product summary to VLM: $e');
   }
 }

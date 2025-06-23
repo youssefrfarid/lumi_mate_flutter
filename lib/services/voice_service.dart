@@ -94,6 +94,11 @@ class VoiceService {
     return completer.future;
   }
 
+  void stopPlayback() {
+    _audioPlayer?.stop();
+    debugPrint('VoiceService: Playback stopped via stopPlayback().');
+  }
+
   void dispose() {
     _audioPlayer?.dispose();
   }
